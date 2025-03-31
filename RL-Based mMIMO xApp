@@ -1,0 +1,157 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Dec 12 12:06:38 2024
+
+@author: hnf514
+"""
+
+"""
+import random
+import json
+import requests
+import sys
+import pandas as pd
+import numpy as np
+import time
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from collections import deque
+
+from new_ue_data_fetch_process import fetch_ue_data
+from new_ue_neighbour_data_fetch_process import fetch_neighbour_ue_data
+from new_cell_data_fetch_process import fetch_microcell_data
+from get_last_simulation_id_non_stand_alone import retrieve_latest_sim_id
+
+# -------- Hyperparameters --------
+ENABLE_XAPP = True  # Enable xApp execution
+MONITOR_DATABASE = True  # Verify database connectivity
+
+MIN_CELL_RUNTIME = 15  # Minimum seconds a cell must stay active before scaling down mMIMO order
+MIMO_ADJUST_DELAY = 5  # Delay before modifying mMIMO order
+ACTIVATION_DELAY = 3  # Delay before scaling up mMIMO order
+MAX_XAPP_RUNTIME = 7200  # Max execution time (2 hours)
+
+UTILIZATION_THRESHOLD = 50  # PRB usage threshold for reducing mMIMO order
+RSRP_THRESHOLD = -110  # Minimum acceptable RSRP for handovers
+
+MAX_CELL_SEARCH_RADIUS = 250  # Max distance to find neighboring cells for activation
+
+STATE_SIZE = 3  # [SINR, UE Throughput, Number of UEs]
+ACTION_SIZE = 5  # Different mMIMO states
+GAMMA = 0.9
+LEARNING_RATE = 0.001
+EPSILON = 1.0
+EPSILON_MIN = 0.1
+EPSILON_DECAY = 0.995
+MEMORY_SIZE = 2000
+BATCH_SIZE = 32
+
+# -------- System Variables --------
+cell_mimo_log = {}  # Tracks last mMIMO adjustment time for each cell
+
+# -------- Simulation Setup --------
+SIMULATION_SERVER = "10.122.14.52"
+STOP_SIMULATION_URL = f"http://{SIMULATION_SERVER}/sba/tests/status/20-simulation"
+LATEST_SIM_ID = retrieve_latest_sim_id(f"http://{SIMULATION_SERVER}/sba/influx/query?q=SHOW%20DATABASES")
+
+DATA_QUERY_URL = f"http://{SIMULATION_SERVER}/influx/query?db={LATEST_SIM_ID}-simulation&q="
+UE_REPORT_URL = f"{DATA_QUERY_URL}SELECT * FROM UEReports GROUP BY Viavi.UE.Name ORDER BY time DESC LIMIT 1"
+NEIGHBOUR_REPORT_URL = f"{DATA_QUERY_URL}SELECT * FROM UEReports-neighbour GROUP BY Viavi.UE.Name ORDER BY time DESC LIMIT 4"
+CELL_REPORT_URL = f"{DATA_QUERY_URL}SELECT * FROM CellReports GROUP BY Viavi.Cell.Name ORDER BY time DESC LIMIT 1"
+
+# -------- RL Neural Network --------
+class DQN(nn.Module):
+    def __init__(self, state_size, action_size):
+        super(DQN, self).__init__()
+        self.fc1 = nn.Linear(state_size, 64)
+        self.fc2 = nn.Linear(64, 64)
+        self.fc3 = nn.Linear(64, action_size)
+
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        return self.fc3(x)
+
+# -------- RL Agent --------
+class RLAgent:
+    def __init__(self):
+        self.model = DQN(STATE_SIZE, ACTION_SIZE)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=LEARNING_RATE)
+        self.loss_fn = nn.MSELoss()
+        self.epsilon = EPSILON
+
+    def act(self, state):
+        if np.random.rand() <= self.epsilon:
+            return np.random.choice(ACTION_SIZE)  # Explore
+        state_tensor = torch.tensor(state, dtype=torch.float32)
+        q_values = self.model(state_tensor)
+        return torch.argmax(q_values).item()  # Exploit
+
+    def train(self, state, action, reward, next_state, done):
+        state_tensor = torch.tensor(state, dtype=torch.float32)
+        next_state_tensor = torch.tensor(next_state, dtype=torch.float32)
+        target = reward
+        if not done:
+            target += GAMMA * torch.max(self.model(next_state_tensor)).item()
+        target_f = self.model(state_tensor).clone()
+        target_f[action] = target
+        self.optimizer.zero_grad()
+        loss = self.loss_fn(self.model(state_tensor), target_f)
+        loss.backward()
+        self.optimizer.step()
+        if self.epsilon > EPSILON_MIN:
+            self.epsilon *= EPSILON_DECAY
+
+# Initialize RL Agent
+agent = RLAgent()
+
+# -------- Modify mMIMO Order --------
+def adjust_mimo_order(cell_id, mimo_mask):
+    if cell_id in cell_mimo_log:
+        if time.time() - cell_mimo_log[cell_id] < MIN_CELL_RUNTIME:
+            return
+    payload = {"type": "Antenna Configuration", "cell": cell_id, "antennaMask": mimo_mask}
+    requests.post(f"http://{SIMULATION_SERVER}/sba/commands", json=payload)
+    cell_mimo_log[cell_id] = time.time()
+    time.sleep(MIMO_ADJUST_DELAY)
+
+# -------- Main Execution --------
+start_time = time.time()
+while ENABLE_XAPP:
+    elapsed_time = time.time() - start_time
+    if elapsed_time >= MAX_XAPP_RUNTIME:
+        print("Execution time exceeded. Stopping xApp.")
+        break
+
+    ue_data = fetch_ue_data(UE_REPORT_URL)
+    cell_data = fetch_microcell_data(CELL_REPORT_URL)
+
+    if any(df is None or df.isnull().values.any() for df in [ue_data, cell_data]):
+        print("Data fetch error. Retrying...")
+        time.sleep(1)
+        continue
+
+    # Fetch KPIs
+    sinr_values = ue_data['Viavi.UE.SINR'].mean()
+    ue_throughput = ue_data['DRB.UEThpDl'].mean()
+    num_ues = ue_data['Viavi.UE.Name'].nunique()
+    state = np.array([sinr_values, ue_throughput, num_ues])
+
+    # RL Decision - Select Mask
+    action = agent.act(state)
+    mask_values = [
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "1111111100000000000000000000000000000000000000000000000000000000",
+        "1111111111111111000000000000000000000000000000000000000000000000",
+        "1111111111111111111111111111111100000000000000000000000000000000",
+        "1111000000000000000000000000000000000000000000000000000000000000",
+    ]
+    mimo_mask = mask_values[action]
+    for _, cell in cell_data.iterrows():
+        adjust_mimo_order(cell['Viavi.Cell.Name'], mimo_mask)
+    agent.train(state, action, reward=0, next_state=state, done=False)
+
+# Stop simulation
+requests.delete(STOP_SIMULATION_URL, json={"type": "stop"})
+print("Simulation completed.")
