@@ -1,0 +1,163 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Sun Apr 28 11:39:52 2024
+
+@author: hnf514
+"""
+
+#Imports
+import requests
+import json
+import pandas as pd
+import os
+#-------------------------------------#
+    
+# Define the URL
+#base_url = "http://144.32.33.150/sba/influx/query?db=818-simulation&q=SELECT%20*%20FROM%20CellReports%20GROUP%20BY%20%22Viavi.Cell.Name%22%20ORDER%20BY%20time%20DESC%20LIMIT%20"
+base_url = "http://144.32.33.150/sba/influx/query?q=SELECT%20*%20FROM%20CellReports%20GROUP%20BY%20%22Viavi.Cell.Name%22%20ORDER%20BY%20time%20DESC%20LIMIT%20"
+
+num_reports =50
+
+
+# "http://127.0.0.1/sba/influx/query?q=SELECT%20*%20FROM%20CellReports%20GROUP%20BY%20%22Viavi.Cell.Name%22%20ORDER%20BY%20time%20DESC%20LIMIT%20999999999999999900"
+# "http://127.0.0.1/sba/influx/query?q=SELECT%20*%20FROM%20CellReports%20GROUP%20BY%20%22Viavi.Cell.Name%22"
+# "http://127.0.0.1/sba/influx/query?q=SELECT%20*%20FROM%20CellReports%20GROUP%20BY%20%22Viavi.Cell.Name%22%20ORDER%20BY%20time%20DESC%20LIMIT%201"
+# "http://127.0.0.1/sba/influx/query?db=284-simulation&q=SELECT%20*%20FROM%20CellReports%20GROUP%20BY%20%22Viavi.Cell.Name%22%20ORDER%20BY%20time%20DESC%20LIMIT%201"
+# "http://127.0.0.1/sba/influx/query?q=SELECT%20*%20FROM%20CellReports%20GROUP%20BY%20%22Viavi.Cell.Name%22%20ORDER%20BY%20time%20DESC%20LIMIT%201"
+
+
+
+def request_URL(url):
+    # Send a GET request to the URL
+    response = requests.get(url)
+    # Check if the request was successful (status code 200)
+    if response.status_code == 200:
+        # Extract data from the response 
+        json_data = response.json()
+        #print(data)
+        print("Success to fetch data from the URL:", response.status_code)
+    else:
+        print("Failed to fetch data from the URL:", response.status_code)
+
+    return json_data
+ #---------------------------------------------# 
+
+
+def request_URL_again(request_again):
+    if request_again is True: 
+         try: 
+             request_URL(url)
+             #response = requests.get(url)
+             print("URL requested again", request_again)
+         except Exception as e:
+             print(f"expection {str(e)}")
+    return 
+
+
+
+def count_and_find_none(rows,counter_none,request_again):
+    # Check for None values in the series values
+    
+    for item in rows: 
+        for values in item:
+            if values is None:
+                counter_none += 1
+                request_again = True
+                        
+    # Raise error if counte_none is more than 2 (i.e., more than 2 attributes got None value)  
+    if counter_none >1: 
+        raise ValueError("More than 2 Attributes got None values in series data")
+    #print("Inside the count and find none:  Statue: ", request_again)
+    return request_again
+
+
+def process_series_with_order_and_exception_handling(series): #, counter_none,request_again):
+    
+    # Create DataFrame from series values
+    df = pd.DataFrame(series['values'], columns=series['columns'])
+    
+    # Initial desired order of columns, including Viavi.Cell.Name and possibly missing columns
+    desired_order = [
+        "time",
+        "Viavi.Cell.Name",
+        "RRU.PrbUsedDl",
+        "RRU.PrbUsedUl",
+        "PEE.AvgPower", 
+        "DRB.UEThpDl",
+        "Viavi.Geo.x",
+        "Viavi.Geo.y",
+        "Viavi.PEE.EnergyEfficiency", 
+        "Viavi.QoS.Score",
+        "Viavi.Radio.antennaType",
+        "Viavi.Radio.azimuth", 
+        "Viavi.Radio.power"
+    ]
+
+    
+    # Insert Viavi.Cell.Name column from series tags
+    viavi_cell_name = series['tags'].get("Viavi.Cell.Name", "Unknown")
+    if 'Viavi.Cell.Name' not in df.columns:
+        df.insert(1, 'Viavi.Cell.Name', viavi_cell_name)
+        
+    
+    # Handle each column in the desired order with exception handling
+    for column in desired_order:     
+        if column not in df.columns:
+            try:
+                #print("Things are missing", column)
+                # Attempt to handle the missing column appropriately
+                # For this example, we'll add missing columns with default None values
+                df[column] = None
+            except Exception as e:
+                print(f"Error handling the column {column}: {str(e)}")
+    
+    # Reorder the DataFrame based on the processed desired order and include any additional columns not specified
+    final_columns_order = [col for col in desired_order if col in df.columns] # + [col for col in df.columns if col not in desired_order]
+    df = df[final_columns_order]
+
+    
+    # Add the series name as a column
+    df['series_name'] = series['name']
+    return df
+
+
+for i in range(1, num_reports + 1):
+    url = f"{base_url}{i}"
+# Apply the updated function to each series in the data and concatenate into a single DataFrame
+    json_data = request_URL(url)
+#print("json_data: ", json_data)
+
+    final_df_exception_handling = pd.concat([process_series_with_order_and_exception_handling(s) for s in json_data['results'][0]['series']], ignore_index=True)
+#print(final_df_exception_handling['Viavi.Cell.Name'].isnull())
+    counter_null= 0
+    for idx, row in final_df_exception_handling.iterrows():
+    #print(idx, row)
+
+    # Checking the null
+        if row.isnull().any():
+            counter_null += 1
+        print("counter_null: ", counter_null)
+    
+        cell_time          = row['time']
+        cell_name          = row['Viavi.Cell.Name']
+        cell_PrbUsedDl     = row['RRU.PrbUsedDl']
+        cell_AvgPower      = row['PEE.AvgPower']
+        cell_UEThpDl       = row['DRB.UEThpDl']
+        cell_geo_x         = row['Viavi.Geo.x']
+        cell_geo_y         = row['Viavi.Geo.y']
+        cell_EE            = row['Viavi.PEE.EnergyEfficiency']
+        cell_qos_score     = row['Viavi.QoS.Score']
+        cell_antenna_type  = row['Viavi.Radio.antennaType']
+        cell_radio_azimuth = row['Viavi.Radio.azimuth']
+        cell_radio_power   = row['Viavi.Radio.power']
+    
+        folder_name = "CELL_REPORT"
+        os.makedirs(folder_name, exist_ok=True)
+        csv_file_name = os.path.join(folder_name, f"CellReports_{i}.csv")
+       # csv_file_name = f"CellReports_{i}.csv"
+    #print(idx, cell_time, cell_name, cell_PrbUsedDl, cell_AvgPower, cell_UEThpDl, cell_geo_x, cell_geo_y, cell_EE)
+        print(final_df_exception_handling.to_markdown())
+        final_df_exception_handling.to_csv(csv_file_name, index=False)
+
+
+ 
