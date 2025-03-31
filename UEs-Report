@@ -1,0 +1,48 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Mar 11 16:44:18 2025
+
+@author: hnf514
+"""
+
+import requests
+import pandas as pd
+import json
+import time
+
+# Step 1: Define the URL
+url = "http://144.32.33.150/sba/influx/query?q=SELECT+%2A+FROM+UEReports+ORDER+BY+time+DESC+LIMIT+100"
+
+# Step 2: Function to Fetch and Process Live Data
+def fetch_live_ue_data():
+    response = requests.get(url)
+    if response.status_code == 200:
+        data = response.json()  # Parse the JSON response
+        
+        # Step 3: Extract the relevant data from JSON
+        series = data.get("results", [])[0].get("series", [])[0]
+        columns = series.get("columns", [])
+        values = series.get("values", [])
+        
+        # Step 4: Add a column for UE number
+        ue_numbers = list(range(1, len(values) + 1))  # Generate UE numbers sequentially
+        
+        # Step 5: Convert to DataFrame
+        df = pd.DataFrame(values, columns=columns)
+        df.insert(0, "UE Number", ue_numbers)  # Insert UE number as the first column
+        
+        # Step 6: Save DataFrame to CSV
+        csv_filename = "Live_UEReports.csv"
+        df.to_csv(csv_filename, index=False)
+        print(f"Live data saved to '{csv_filename}'")
+    else:
+        print(f"Failed to fetch data. HTTP Status Code: {response.status_code}")
+
+# Step 7: Run Live Data Extraction at Regular Intervals
+if __name__ == "__main__":
+    try:
+        while True:
+            fetch_live_ue_data()
+            time.sleep(5)  # Fetch data every 5 seconds
+    except KeyboardInterrupt:
+        print("Live UE data extraction stopped.")
